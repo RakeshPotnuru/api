@@ -31,6 +31,19 @@ type ErrorResponse struct {
     Error string `json:"error"`
 }
 
+type SubscribeRequest struct {
+    Email         string `json:"email"`
+    UTMSource     string `json:"utm_source,omitempty"`
+    UTMMedium     string `json:"utm_medium,omitempty"`
+    ReferringSite string `json:"referring_site,omitempty"`
+}
+
+type BeehiivResponse struct {
+    Data struct {
+        ID string `json:"id"`
+    } `json:"data"`
+}
+
 func sendTelegramMessage(config Config, message string) error {
     baseURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", config.BotToken)
     
@@ -88,6 +101,87 @@ func handleSendMessage(w http.ResponseWriter, r *http.Request, config Config) {
     json.NewEncoder(w).Encode(map[string]string{"status": "Message sent successfully"})
 }
 
+func subscribeToBeehiiv(req SubscribeRequest) error {
+    publicationID := os.Getenv("BEEHIIV_PUBLICATION_ID")
+    if publicationID == "" {
+        return fmt.Errorf("BEEHIIV_PUBLICATION_ID environment variable is required")
+    }
+    
+    url := fmt.Sprintf("https://api.beehiiv.com/v2/publications/%s/subscriptions", publicationID)
+    
+    payload := map[string]interface{}{
+        "email": req.Email,
+    }
+
+    // Add optional fields if they're present
+    if req.UTMSource != "" {
+        payload["utm_source"] = req.UTMSource
+    }
+    if req.UTMMedium != "" {
+        payload["utm_medium"] = req.UTMMedium
+    }
+    if req.ReferringSite != "" {
+        payload["referring_site"] = req.ReferringSite
+    }
+    
+    jsonData, err := json.Marshal(payload)
+    if err != nil {
+        return fmt.Errorf("error marshaling payload: %v", err)
+    }
+
+    httpReq, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(jsonData)))
+    if err != nil {
+        return fmt.Errorf("error creating request: %v", err)
+    }
+
+    apiKey := os.Getenv("BEEHIIV_API_KEY")
+    if apiKey == "" {
+        return fmt.Errorf("BEEHIIV_API_KEY environment variable is required")
+    }
+
+    httpReq.Header.Set("Content-Type", "application/json")
+    httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+    client := &http.Client{}
+    resp, err := client.Do(httpReq)
+    if err != nil {
+        return fmt.Errorf("error sending request: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+        return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+    }
+
+    return nil
+}
+
+func handleSubscribe(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var req SubscribeRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid request body"})
+        return
+    }
+
+    if req.Email == "" {
+        json.NewEncoder(w).Encode(ErrorResponse{Error: "Email cannot be empty"})
+        return
+    }
+
+    err := subscribeToBeehiiv(req)
+    if err != nil {
+        json.NewEncoder(w).Encode(ErrorResponse{Error: err.Error()})
+        return
+    }
+
+    json.NewEncoder(w).Encode(map[string]string{"status": "Subscription successful"})
+}
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Printf("Warning: .env file not found")
@@ -118,6 +212,8 @@ func main() {
     mux.HandleFunc("/send", func(w http.ResponseWriter, r *http.Request) {
         handleSendMessage(w, r, config)
     })
+
+    mux.HandleFunc("/subscribe", handleSubscribe)
     
     port := os.Getenv("PORT")
     if port == "" {
